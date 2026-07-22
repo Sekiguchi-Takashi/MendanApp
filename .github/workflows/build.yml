@@ -19,10 +19,20 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      # 面談チェック（フェーズ2・4）
+      - name: Build MendanApp
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      # 面談録音（フェーズ1）
+      - name: Build OkoshiApp
+        run: gradle :okoshi:assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: MendanApp-debug
           path: app/build/outputs/apk/debug/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OkoshiApp-debug
+          path: okoshi/build/outputs/apk/debug/*.apk

@@ -13,4 +13,8 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "MendanApp"
+
+// フェーズ2・4  面談チェック
 include ':app'
+// フェーズ1     面談録音
+include ':okoshi'
