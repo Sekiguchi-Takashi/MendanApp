@@ -22,7 +22,7 @@ import android.widget.*
 import kotlin.concurrent.thread
 
 /**
- * v0.3
+ * v0.4
  *
  * v0.2 の問題:
  *   RUN_COMMAND_BACKGROUND=false だと Termux が Activity を起動するため
@@ -73,7 +73,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "面談録音  v0.3"
+            text = "面談録音  v0.4"
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
         })
@@ -308,7 +308,7 @@ class MainActivity : Activity() {
         }
         if (Prefs.tree(this) == null) {
             log.text = "先に「出力フォルダを選ぶ」で\n" +
-                    "Download/okoshi を指定してください。\n" +
+                    "Music/okoshi を指定してください。\n" +
                     "完了検出に必要です。"
             return
         }
