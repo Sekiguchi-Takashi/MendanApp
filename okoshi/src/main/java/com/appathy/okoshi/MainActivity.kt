@@ -2,9 +2,6 @@ package com.appathy.okoshi
 
 import android.Manifest
 import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -22,7 +19,7 @@ import android.widget.*
 import kotlin.concurrent.thread
 
 /**
- * v0.4
+ * v0.5
  *
  * v0.2 の問題:
  *   RUN_COMMAND_BACKGROUND=false だと Termux が Activity を起動するため
@@ -52,8 +49,6 @@ class MainActivity : Activity() {
     private lateinit var recBtn: Button
     private lateinit var folderBtn: Button
     private lateinit var runBtn: Button
-    private lateinit var copyBtn: Button
-    private lateinit var shareBtn: Button
     private lateinit var log: TextView
 
     private var lastPath: String? = null
@@ -73,7 +68,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "面談録音  v0.4"
+            text = "面談録音  v0.5"
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
         })
@@ -117,19 +112,7 @@ class MainActivity : Activity() {
         }
         root.addView(runBtn)
 
-        copyBtn = Button(this).apply {
-            text = "コマンドをコピー"
-            isEnabled = false
-            setOnClickListener { copyCommand() }
-        }
-        root.addView(copyBtn)
 
-        shareBtn = Button(this).apply {
-            text = "MendanAppへ送る"
-            isEnabled = false
-            setOnClickListener { share() }
-        }
-        root.addView(shareBtn)
 
         log = TextView(this).apply {
             setPadding(0, pad, 0, 0)
@@ -153,7 +136,6 @@ class MainActivity : Activity() {
         if (f != null && !f.startsWith("ERROR:")) {
             lastPath = f
             runBtn.isEnabled = true
-            copyBtn.isEnabled = true
         }
     }
 
@@ -187,7 +169,7 @@ class MainActivity : Activity() {
         if (req == REQ_TERMUX) {
             if (hasTermuxPerm()) transcribe()
             else log.text = "Termuxの実行権限が許可されませんでした。\n" +
-                    "「コマンドをコピー」で手動実行してください。"
+                    "Termuxで直接 okoshi を実行してください。"
         }
     }
 
@@ -232,8 +214,6 @@ class MainActivity : Activity() {
             lastPath = null
             resultText = null
             runBtn.isEnabled = false
-            copyBtn.isEnabled = false
-            shareBtn.isEnabled = false
             log.text = ""
             val i = Intent(this, RecService::class.java).setAction(RecService.ACTION_START)
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
@@ -266,7 +246,6 @@ class MainActivity : Activity() {
                         } else {
                             lastPath = f
                             runBtn.isEnabled = true
-                            copyBtn.isEnabled = true
                             log.text = "保存しました\n$f"
                         }
                     }
@@ -282,19 +261,6 @@ class MainActivity : Activity() {
     private fun baseName(): String {
         val p = lastPath ?: return ""
         return p.substringAfterLast('/').substringBeforeLast('.')
-    }
-
-    private fun command(): String {
-        val p = lastPath ?: return ""
-        return "termux-wake-lock; okoshi \"$p\"; termux-wake-unlock"
-    }
-
-    private fun copyCommand() {
-        if (lastPath == null) return
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("okoshi", command()))
-        log.text = "コピーしました。Termuxに貼り付けて実行してください。\n\n" + command()
-        if (Prefs.tree(this) != null) startPolling()
     }
 
     private fun transcribe() {
@@ -327,8 +293,7 @@ class MainActivity : Activity() {
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
             startPolling()
         } catch (e: Exception) {
-            log.text = "Termux起動に失敗しました。\n${e.message}\n\n" +
-                    "「コマンドをコピー」で手動実行してください。"
+            log.text = "Termux起動に失敗しました。\n${e.message}"
         }
     }
 
@@ -354,7 +319,6 @@ class MainActivity : Activity() {
                             polling = false
                             resultText = found
                             runBtn.isEnabled = true
-                            shareBtn.isEnabled = true
                             val head = found.take(400)
                             log.text = "完了（${min}分${sec}秒）\n" +
                                     "${found.length}字\n\n" +
@@ -407,18 +371,6 @@ class MainActivity : Activity() {
         } catch (e: Exception) {
             null
         }
-    }
-
-    private fun share() {
-        val t = resultText ?: return
-        startActivity(
-            Intent.createChooser(
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, t)
-                }, "送り先を選択"
-            )
-        )
     }
 
     override fun onDestroy() {

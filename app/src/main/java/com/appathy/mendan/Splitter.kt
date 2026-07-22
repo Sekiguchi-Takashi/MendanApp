@@ -1,11 +1,12 @@
 package com.appathy.mendan
 
 /**
- * フェーズ2の中核。
- * ・表記ゆれを吸収した完全一致検索（長さ保存の正規化なので位置がずれない）
- * ・行境界での分割
- * ・【】マーキング
- * 外部依存ゼロ。
+ * フェーズ2＋4の中核。外部依存ゼロ。
+ *
+ * マーカー記法
+ *   【介護】        アプリが検出した完全一致。未判定。
+ *   【1介護】       質問者（説明者）の発話。評価対象外。
+ *   【2任意の文】   完全一致ではないが重要。要判断として抽出。
  */
 object Splitter {
 
@@ -18,16 +19,23 @@ object Splitter {
         val startLine: Int,
         val endLine: Int,
         val lines: List<String>,
-        val items: List<String>,
         val chars: Int
+    )
+
+    /** 編集後のファイルから拾い出した1件のマーカー。 */
+    data class Mark(
+        val digit: Char?,     // null / '1' / '2'
+        val body: String,     // 【】の中身（数字を除く）
+        val item: String?,    // 確認項目名。該当なしなら null
+        val line: String,     // その行の全文
+        val file: Int,
+        val lineNo: Int
     )
 
     /**
      * 正規化。1文字→1文字を厳守すること。
-     * 長さが変わるとマッチ位置を元テキストへ戻せなくなり、
-     * マーカー挿入がずれる。
-     * 全角英数→半角 / 全角空白→半角 / カタカナ→ひらがな / 小文字化
-     * 既知の制限: 半角カタカナ（濁点が別文字になり1:1にできない）は未対応。
+     * 長さが変わるとマッチ位置を元テキストへ戻せず、【】の挿入位置がずれる。
+     * 既知の制限: 半角カタカナ未対応（濁点が別文字になり1:1にできない）。
      */
     fun norm(s: String): String {
         val sb = StringBuilder(s.length)
@@ -41,7 +49,6 @@ object Splitter {
         return sb.toString()
     }
 
-    /** 1行から重複しないヒットを返す。重なった場合は長い表記を優先。 */
     fun findHits(line: String, items: List<Item>): List<Hit> {
         if (items.isEmpty() || line.isEmpty()) return emptyList()
         val n = norm(line)
@@ -61,16 +68,10 @@ object Splitter {
         all.sortWith(compareBy({ it.start }, { -(it.end - it.start) }))
         val res = ArrayList<Hit>()
         var last = 0
-        for (h in all) {
-            if (h.start >= last) {
-                res.add(h)
-                last = h.end
-            }
-        }
+        for (h in all) if (h.start >= last) { res.add(h); last = h.end }
         return res
     }
 
-    /** ヒット箇所を【】で囲む。後ろから挿入して位置ずれを防ぐ。 */
     fun mark(line: String, hits: List<Hit>): String {
         if (hits.isEmpty()) return line
         val sb = StringBuilder(line)
@@ -81,11 +82,8 @@ object Splitter {
         return sb.toString()
     }
 
-    /**
-     * 行境界で分割する。発話の途中では絶対に切らない。
-     * 1行が limit を超える場合はその行を丸ごと1ファイルにする。
-     */
-    fun split(text: String, limit: Int, items: List<Item>): List<Chunk> {
+    /** 行境界で分割。発話の途中では絶対に切らない。 */
+    fun split(text: String, limit: Int): List<Chunk> {
         val lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n")
         val chunks = ArrayList<Chunk>()
         var cur = ArrayList<String>()
@@ -93,86 +91,94 @@ object Splitter {
         var count = 0
         var idx = 0
 
-        fun flush(endLineExclusive: Int) {
+        fun flush(endExclusive: Int) {
             if (cur.isEmpty()) return
             idx++
-            val its = LinkedHashSet<String>()
-            for (l in cur) for (h in findHits(l, items)) its.add(h.item)
-            chunks.add(
-                Chunk(idx, curStart + 1, endLineExclusive, ArrayList(cur), its.toList(), count)
-            )
-            cur = ArrayList()
-            count = 0
+            chunks.add(Chunk(idx, curStart + 1, endExclusive, ArrayList(cur), count))
+            cur = ArrayList(); count = 0
         }
 
         for (i in lines.indices) {
             val l = lines[i]
-            if (cur.isNotEmpty() && count + l.length > limit) {
-                flush(i)
-                curStart = i
-            }
+            if (cur.isNotEmpty() && count + l.length > limit) { flush(i); curStart = i }
             if (cur.isEmpty()) curStart = i
-            cur.add(l)
-            count += l.length
+            cur.add(l); count += l.length
         }
         flush(lines.size)
         return chunks
     }
 
-    /** 1ファイル分の本文を組み立てる。prev は直前チャンク末尾の文脈（集計対象外）。 */
-    fun render(c: Chunk, total: Int, prev: List<String>, items: List<Item>): String {
+    /** ファイル本文。1行目のヘッダは解析時に読み飛ばす。 */
+    fun render(c: Chunk, total: Int, items: List<Item>): String {
         val sb = StringBuilder()
-        sb.append("======================================\n")
-        sb.append("ファイル ").append(c.index).append(" / ").append(total).append("\n")
-        sb.append("行 ").append(c.startLine).append("-").append(c.endLine)
-        sb.append("  文字数 ").append(c.chars).append("\n")
-        sb.append("該当項目: ")
-            .append(if (c.items.isEmpty()) "なし" else c.items.joinToString(", "))
-            .append("\n")
-        sb.append("======================================\n\n")
-        if (prev.isNotEmpty()) {
-            sb.append("---- 直前の文脈（集計対象外・読み飛ばし可） ----\n")
-            for (l in prev) sb.append(l).append("\n")
-            sb.append("---- ここから本編 ----\n\n")
-        }
+        sb.append("# ").append(c.index).append("/").append(total)
+            .append("  行 ").append(c.startLine).append("-").append(c.endLine)
+            .append("  ").append(c.chars).append("字\n")
         for (l in c.lines) sb.append(mark(l, findHits(l, items))).append("\n")
         return sb.toString()
     }
 
-    /** 00_サマリ.txt。どの項目がどのファイルに出たか＋未着手一覧。 */
-    fun summary(chunks: List<Chunk>, items: List<Item>, limit: Int, srcName: String): String {
-        val map = LinkedHashMap<String, MutableList<Int>>()
-        for (item in items) map[item.name] = ArrayList()
-        for (c in chunks) for (name in c.items) map[name]?.add(c.index)
+    // ---------- 編集後の解析 ----------
 
-        val sb = StringBuilder()
-        sb.append("面談チェック サマリ\n")
-        sb.append("元データ: ").append(srcName).append("\n")
-        sb.append("総文字数: ").append(chunks.sumOf { it.chars }).append("\n")
-        sb.append("分割単位: ").append(limit).append("字\n")
-        sb.append("ファイル数: ").append(chunks.size).append("\n\n")
-
-        sb.append("---- 出現あり ----\n")
-        var any = false
-        for ((name, files) in map) {
-            if (files.isEmpty()) continue
-            any = true
-            sb.append("[").append(name).append("]  ファイル ")
-                .append(files.joinToString(", ")).append("\n")
+    /** 1ファイル分の本文からマーカーを拾う。 */
+    fun parse(body: String, fileIndex: Int, items: List<Item>): List<Mark> {
+        val out = ArrayList<Mark>()
+        val lines = body.split("\n")
+        for ((li, line) in lines.withIndex()) {
+            if (line.startsWith("#")) continue
+            var i = 0
+            while (true) {
+                val s = line.indexOf('【', i)
+                if (s < 0) break
+                val e = line.indexOf('】', s + 1)
+                if (e < 0) break
+                var inner = line.substring(s + 1, e)
+                var digit: Char? = null
+                if (inner.isNotEmpty()) {
+                    val c0 = inner[0]
+                    if (c0 == '1' || c0 == '１') { digit = '1'; inner = inner.substring(1) }
+                    else if (c0 == '2' || c0 == '２') { digit = '2'; inner = inner.substring(1) }
+                }
+                out.add(Mark(digit, inner, matchItem(inner, items), line, fileIndex, li + 1))
+                i = e + 1
+            }
         }
-        if (!any) sb.append("（なし）\n")
+        return out
+    }
 
-        sb.append("\n---- 未着手（一度も出現せず） ----\n")
-        var none = true
-        for ((name, files) in map) {
-            if (files.isNotEmpty()) continue
-            none = false
-            sb.append("[").append(name).append("]\n")
+    private fun matchItem(body: String, items: List<Item>): String? {
+        val n = norm(body)
+        if (n.isEmpty()) return null
+        for (item in items) {
+            for (f in item.forms) {
+                val nf = norm(f)
+                if (nf.isNotEmpty() && n.contains(nf)) return item.name
+            }
         }
-        if (none) sb.append("（なし）\n")
+        return null
+    }
 
-        sb.append("\n注意: 出現ありは「話題に出た」までを示す。\n")
-        sb.append("発話者の割当と確定/言及の判定は各ファイルを通読して行うこと。\n")
-        return sb.toString()
+    data class Report(
+        val confirmed: LinkedHashMap<String, MutableList<Mark>>, // 完全一致（1以外）
+        val review: MutableList<Mark>,                           // 【2】要判断
+        val excluded: Int,                                       // 【1】除外件数
+        val untouched: List<String>                              // 未着手の項目
+    )
+
+    fun analyze(marks: List<Mark>, items: List<Item>): Report {
+        val conf = LinkedHashMap<String, MutableList<Mark>>()
+        for (item in items) conf[item.name] = ArrayList()
+        val review = ArrayList<Mark>()
+        var excluded = 0
+
+        for (m in marks) {
+            when (m.digit) {
+                '1' -> excluded++
+                '2' -> review.add(m)
+                else -> m.item?.let { conf[it]?.add(m) }
+            }
+        }
+        val untouched = items.map { it.name }.filter { conf[it].isNullOrEmpty() }
+        return Report(conf, review, excluded, untouched)
     }
 }
