@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
+
     <application
-        android:label="面談チェック"
+        android:label="面談文字起こし"
         android:icon="@android:drawable/ic_menu_agenda"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="true">
@@ -16,15 +23,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/*" />
-            </intent-filter>
         </activity>
-
-        <activity android:name=".ItemsActivity" android:exported="false" />
-        <activity android:name=".AnalyzeActivity" android:exported="false" />
 
     </application>
 </manifest>

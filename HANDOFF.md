@@ -1,103 +1,83 @@
-# MendanApp / 面談チェック HANDOFF
+# 面談文字起こし（MendanApp）HANDOFF  ※ゼロベース再構築
 
-## 目的
+## 経緯
 
-対人支援の面談記録（文字起こしテキスト）を通読し、
-事前に決めた確認項目が **実際に聞けたか** を評価するための支援ツール。
+旧構成（録音アプリ OkoshiApp ＋ 評価アプリ MendanApp のフェーズ2/4、
+キーワード強調・1/2マーカー・分割）は **廃止**。
+単一アプリに再構築した。録音は外部アプリで作った AAC を扱う前提。
 
-「聞こうとしたが答えを得られなかった項目」の検出が最終目的。
+踏襲したのは Appathy 規約と Termux+whisper パイプラインの考え方のみ。
 
-## フェーズ構成
+## 機能（3つ）
 
-| フェーズ | 内容 | 実装場所 | 状態 |
-|---|---|---|---|
-| 1 | 録音 → 文字起こし | **外部アプリ**（本アプリ対象外） | 外部 |
-| 2 | キーワード完全一致 → 強調 → 分割 | 本アプリ | **v0.1 実装済** |
-| 3 | AIによる類似表現の再照合 | 保留（フェーズ4を全文通読にしたため不要） | 見送り |
-| 4 | 発話者割当 → 評価 | 本アプリ | **未実装（v0.2予定）** |
+1. **AAC音源を開く・再生する**
+   - SAF(OPEN_DOCUMENT, audio/*) で選択
+   - MediaPlayer で再生・一時停止・シーク
+2. **文字起こし（最長1時間）→ 表示 → 保存**
+   - Termux の whisper.cpp(medium) に投げる
+   - 結果を EditText に表示（編集可）
+   - SAF(CREATE_DOCUMENT) で任意の場所へ .txt 保存
+3. **音源の削除**
+   - DocumentsContract.deleteDocument（確認ダイアログあり）
 
-## 評価ロジック（v0.2で実装する仕様）
+## 中核設計：作業フォルダの共有
 
-参加者ごとに `評価対象 on/off` を持たせる。説明者（支援者）は off。
+アプリ(SAF content://)と Termux(実パス)が同じ場所を読み書きするための仕掛け。
 
-- **確定** … その項目のヒット行が、評価対象の参加者に割り当てられた
-- **言及** … ヒット行はあるが、すべて評価対象外（説明者）の発話
-- **未着手** … ヒット行が存在しない
+- 初回一度だけ「作業フォルダ」を選ぶ（例: Download/okoshi）。永続付与。
+- `Prefs.fsPath()` が SAF ツリーの docId "primary:Download/okoshi" を
+  `/storage/emulated/0/Download/okoshi` に写像する（primary ボリューム限定）。
+- 文字起こし時:
+  1. 選んだ AAC を作業フォルダへ `in_<ms>.m4a` としてSAFコピー
+  2. `okoshi <実パス>` を RUN_COMMAND(background) で起動
+  3. 作業フォルダ(SAF)を10秒間隔で監視し `in_<ms>` を含む .txt を待つ
+  4. 出現したら本文を EditText に表示
 
-「言及」＝ 聞いたが答えを得ていない、が本ツールの主目的。
+SDカード等の非 primary は fsPath が null になり弾く。
 
-### 重要な設計原則
+## Termux 側の前提
 
-- ファイルは **レビュー単位** であって **評価単位ではない**。
-  判定は確認項目ごとに全ファイルを横断して集計する。
-  （項目Aがファイル2で言及、ファイル5で確定というケースを落とさないため）
-- 行の状態は「未割当 / 参加者N / 不要」の3値。
-  未割当と不要を同一視しないこと。割当漏れと意図的除外の区別がつかなくなる。
-- 全ファイル読了で初めて評価確定。未読が残れば警告。
-- 項目単位の **手動オーバーライド** を用意する。
-  復唱（相談者が答えた内容を支援者が言い換えて返す）で誤判定が起きるため。
+- `~/.termux/termux.properties` に `allow-external-apps=true` → `termux-reload-settings`
+- `~/bin/okoshi` が実行可能で、whisper.cpp(build) と ggml-medium-q5_0.bin が存在
+- **okoshi の OUTDIR を作業フォルダに合わせること**。
+  アプリの監視先＝作業フォルダなので、出力もそこに出す必要がある。
+  例: 作業フォルダが Download/okoshi なら
+      `sed -i 's|^OUTDIR=.*|OUTDIR=~/storage/downloads/okoshi|' ~/bin/okoshi`
+- okoshi は入力を ffmpeg で 16kHz/mono/wav に変換してから whisper にかけるので
+  AAC/m4a をそのまま渡してよい
+- 長時間処理のため okoshi 内で termux-wake-lock を掴む（掴んでいなければ
+  `sed -i '/^set -e/a termux-wake-lock 2>/dev/null || true\ntrap "termux-wake-unlock 2>/dev/null || true" EXIT' ~/bin/okoshi`）
 
-## v0.1 の処理内容
+## 実測（この端末）
 
-1. 文字起こしテキストを取り込む（SAF または 他アプリからの「共有」）
-2. 確認項目のキーワードを完全一致で検索し `【】` で囲む
-3. 指定文字数（既定1500字）で **行境界** で分割
-4. 出力フォルダ（SAF の OPEN_DOCUMENT_TREE で一度だけ選択）へ書き出す
-   - `yyyyMMdd_HHmm_00_サマリ.txt` … 項目ごとの出現ファイル一覧＋未着手一覧
-   - `yyyyMMdd_HHmm_01.txt` … 以降連番
+- medium は音声を常に30秒単位で処理。4秒音声でも約39秒（大半がencode固定費）
+- encode ≒ 24秒/30秒チャンク。1時間音源 ≒ 120チャンク → **1〜2時間**が目安
+- 空きメモリでの medium 起動は確認済み（538MB, OOMなし）
+- 遅い場合: OKOSHI_THREADS を上げる / OKOSHI_BEAM=1 / small-q5_1 に落とす
 
-各ファイル冒頭に、前ファイル末尾3行を「直前の文脈（集計対象外）」として付ける。
-
-### 文字数の目安
-
-日本語の会話文字起こしは概ね **毎分200〜300字**。
-30分の面談 = 6,000〜10,000字 = 1500字なら **4〜7ファイル**。
-（当初「30分=1500字」と想定していたが、これは5〜7分相当）
-
-## 実装上の注意
-
-- `Splitter.norm()` は **1文字→1文字を厳守**。
-  長さが変わるとマッチ位置を元テキストへ戻せず、`【】` の挿入位置がずれる。
-- 既知の制限: 半角カタカナ未対応（濁点が別文字になり1:1にできない）。
-- 分割は行境界のみ。発話の途中では切らない。
-- 1行が上限を超える場合は、その行を丸ごと1ファイルにする。
-
-## ビルド規約（全Appathyプロジェクト共通・変更不可）
+## ビルド規約（Appathy共通・変更不可）
 
 - AGP 8.5.2 / Kotlin 1.9.24 / Gradle 8.9 / JDK 17
-- Gradle wrapper を置かない（GitHub Actions の `gradle/actions/setup-gradle@v4` で固定）
-- **外部依存ゼロ**（appcompat / Compose / androidx 一切なし）
-- XMLレイアウトなし。プログラマティックUIのみ
-- Activity は `android.app.Activity` を直接継承
-- テーマは `@android:style/Theme.Material.Light.NoActionBar`
-- 永続化は SharedPreferences + `org.json`（AndroidSDK同梱のみ）
-- `debug.keystore` をリポジトリにコミットして署名を固定（`git add -f` が必要）
-
-### 落とし穴
-
-- **`git init` をホームディレクトリで打たないこと。**
-  トークンが Push Protection (GH013) で露出する。必ずプロジェクトフォルダに `cd` してから。
+- Gradle wrapper を置かない（`gradle/actions/setup-gradle@v4`）
+- 外部依存ゼロ / XMLレイアウトなし / `android.app.Activity` 直継承
+- `debug.keystore` をコミットして署名固定（`git add -f`）
+- **`git init` をホームで打たない**（GH013 トークン露出）。`git -C <dir>` を使う
 
 ## リポジトリ
 
-- GitHub: `Sekiguchi-Takashi/MendanApp`
+- GitHub: `Sekiguchi-Takashi/MendanApp`（既存リポジトリを再構築）
 - パッケージ: `com.appathy.mendan`
+- 旧 `okoshi` モジュールと旧フェーズ2/4ソースは削除済み
 
-## 次にやること（v0.2）
+## 次の候補
 
-1. 出力をアプリ内保持へ切り替え（レビュー進捗を保存するため）
-2. 参加者リスト管理（名前 / 役割 / 評価対象 on-off）
-3. ヒット行への発話者割当UI（前後2〜3行の文脈カード＋参加者チップ）
-4. 全文ブラウズ＋検索から手動でヒット行を追加する機能
-5. 項目横断の集計と手動オーバーライド
-6. 読了フラグと未読警告
+- 長時間音源の分割投入（30分ごとに区切って部分結果を順次表示）
+- 文字起こし中のフォアグラウンド通知（進捗の可視化）
+- 作業フォルダ内の入力 .m4a を文字起こし後に自動削除するオプション
 
-## 保留事項
+## 注意
 
-- BonsaiApp との連携は現時点で **見送り**。
-  再開する場合はチャット分割の運用（`BONSAI_API.md` に契約を記載、
-  サーバー側の変更は BonsaiApp チャットのみが行う、
-  新チャットは契約＋HANDOFF.md を貼って開始）に従うこと。
-- 対人支援の記録を扱うため、トランスクリプトの保持期間と
-  分析後の破棄ルールを運用側で先に決めておくこと。
-  本アプリは全処理が端末内で完結し外部送信ゼロ。
+- 対人支援の面談記録を扱う。全処理が端末内で完結し外部送信ゼロ。
+  保持期間・破棄ルールは運用側で先に決める。
+- Bonsai 連携は見送り中。再開時は BONSAI_API.md に契約を記載し、
+  サーバー側変更は BonsaiApp チャットのみ、新チャットは契約＋HANDOFF.md で開始。

@@ -1,58 +1,74 @@
 package com.appathy.mendan
 
+import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.*
-import java.io.File
 import kotlin.concurrent.thread
 
 /**
- * v0.2
+ * 面談文字起こし v1.0（ゼロベース再構築 / 単一アプリ）
  *
- * 変更点
- *  - 出力先フォルダの選択（SAF）を廃止。アプリ内部に保存する。
- *  - 分割後、先頭ファイルを画面下の編集欄にそのまま開く。
- *  - 編集欄に「1を付ける」「2で囲む」を用意し、手打ちを不要にする。
- *  - 分割上限を 500字 に変更。
+ * 機能
+ *  1. AAC音源を開く・再生する
+ *  2. 文字起こし（最長1時間） → 画面表示 → 保存
+ *  3. 音源ファイルの削除
+ *
+ * 文字起こしは Termux の whisper.cpp(medium) に投げる（従来の踏襲）。
+ * アプリと Termux が同じ作業フォルダを共有し、SAF と実パスの両面から
+ * 同じ場所を読み書きする。作業フォルダの選択は初回一度きり。
  */
 class MainActivity : Activity() {
 
     companion object {
-        private const val REQ_TEXT = 1001
-        private const val REQ_ITEMS = 1003
+        private const val PERM_TERMUX = "com.termux.permission.RUN_COMMAND"
+        private const val OKOSHI = "/data/data/com.termux/files/home/bin/okoshi"
+
+        private const val REQ_OPEN = 1
+        private const val REQ_TREE = 2
+        private const val REQ_SAVE = 3
+        private const val REQ_TERMUX = 4
+
+        private const val POLL_MS = 10000L
+        private const val TIMEOUT_MIN = 180
     }
 
     private val ui = Handler(Looper.getMainLooper())
 
-    private lateinit var srcView: TextView
-    private lateinit var limitInput: EditText
-    private lateinit var runBtn: Button
-    private lateinit var pageLabel: TextView
-    private lateinit var prevBtn: Button
-    private lateinit var nextBtn: Button
+    private lateinit var workBtn: Button
     private lateinit var openBtn: Button
+    private lateinit var nameView: TextView
+    private lateinit var playBtn: Button
+    private lateinit var seek: SeekBar
+    private lateinit var timeView: TextView
+    private lateinit var transBtn: Button
     private lateinit var saveBtn: Button
-    private lateinit var mark1Btn: Button
-    private lateinit var mark2Btn: Button
-    private lateinit var editor: EditText
+    private lateinit var delBtn: Button
     private lateinit var status: TextView
+    private lateinit var editor: EditText
 
-    private var text: String? = null
-    private var srcName: String = "-"
-    private var files: List<File> = emptyList()
-    private var page = 0
-    private var dirty = false
+    private var audioUri: Uri? = null
+    private var audioName: String = "-"
+    private var player: MediaPlayer? = null
+    private var prepared = false
+    private var polling = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,62 +82,71 @@ class MainActivity : Activity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "面談チェック  v0.2"
+            text = "面談文字起こし  v1.0"
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
         })
 
-        // 1
-        root.addView(Button(this).apply {
-            text = "1. 文字起こしを選ぶ"
-            setOnClickListener { pickText() }
-        })
-        srcView = TextView(this).apply {
+        workBtn = Button(this).apply {
+            setOnClickListener { pickTree() }
+        }
+        root.addView(workBtn)
+
+        root.addView(divider(d))
+
+        // ---- 1. 開く・再生 ----
+        openBtn = Button(this).apply {
+            text = "音源を開く（AAC / m4a）"
+            setOnClickListener { pickAudio() }
+        }
+        root.addView(openBtn)
+
+        nameView = TextView(this).apply {
             text = "未選択"
             setTextColor(Color.DKGRAY)
             textSize = 12f
         }
-        root.addView(srcView)
+        root.addView(nameView)
 
-        // 2
-        root.addView(Button(this).apply {
-            text = "2. 確認項目を編集"
-            setOnClickListener {
-                startActivityForResult(Intent(this@MainActivity, ItemsActivity::class.java), REQ_ITEMS)
-            }
-        })
-
-        // 3
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(TextView(this@MainActivity).apply {
-                text = "1ファイル "
-                textSize = 12f
-            })
-            limitInput = EditText(this@MainActivity).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER
-                setText(Store.limit(this@MainActivity).toString())
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            playBtn = Button(this@MainActivity).apply {
+                text = "再生"
+                isEnabled = false
+                setOnClickListener { togglePlay() }
             }
-            addView(limitInput)
-            addView(TextView(this@MainActivity).apply {
-                text = " 字"
+            addView(playBtn)
+            timeView = TextView(this@MainActivity).apply {
+                text = "0:00 / 0:00"
                 textSize = 12f
-            })
+                typeface = Typeface.MONOSPACE
+                setPadding((d * 12).toInt(), 0, 0, 0)
+            }
+            addView(timeView)
         })
-        runBtn = Button(this).apply {
-            text = "3. 分割して保存"
-            isEnabled = false
-            setOnClickListener { runSplit() }
-        }
-        root.addView(runBtn)
 
-        // 4
-        root.addView(Button(this).apply {
-            text = "4. 分析する"
-            setOnClickListener { analyze() }
-        })
+        seek = SeekBar(this).apply {
+            isEnabled = false
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (fromUser) player?.seekTo(p)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) {}
+            })
+        }
+        root.addView(seek)
+
+        root.addView(divider(d))
+
+        // ---- 2. 文字起こし ----
+        transBtn = Button(this).apply {
+            text = "文字起こし（Termux / medium）"
+            isEnabled = false
+            setOnClickListener { transcribe() }
+        }
+        root.addView(transBtn)
 
         status = TextView(this).apply {
             setPadding(0, pad / 2, 0, pad / 2)
@@ -130,270 +155,409 @@ class MainActivity : Activity() {
         }
         root.addView(status)
 
-        // ---- 編集エリア ----
-        root.addView(View(this).apply { setBackgroundColor(Color.LTGRAY) },
-            LinearLayout.LayoutParams(MATCH_PARENT, (d * 1).toInt()))
-
-        root.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            prevBtn = Button(this@MainActivity).apply {
-                text = "◀"
-                setOnClickListener { move(-1) }
-            }
-            addView(prevBtn)
-            pageLabel = TextView(this@MainActivity).apply {
-                text = "-"
-                gravity = Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-            }
-            addView(pageLabel)
-            nextBtn = Button(this@MainActivity).apply {
-                text = "▶"
-                setOnClickListener { move(1) }
-            }
-            addView(nextBtn)
-        })
-
-        root.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            openBtn = Button(this@MainActivity).apply {
-                text = "開く"
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-                setOnClickListener { open(page) }
-            }
-            addView(openBtn)
-            saveBtn = Button(this@MainActivity).apply {
-                text = "保存"
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-                setOnClickListener { save() }
-            }
-            addView(saveBtn)
-        })
-
-        root.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            mark1Btn = Button(this@MainActivity).apply {
-                text = "1を付ける"
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-                setOnClickListener { addDigit('1') }
-            }
-            addView(mark1Btn)
-            mark2Btn = Button(this@MainActivity).apply {
-                text = "2で囲む"
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-                setOnClickListener { wrapTwo() }
-            }
-            addView(mark2Btn)
-        })
-
-        root.addView(TextView(this).apply {
-            text = "【1…】質問者の発話＝評価対象外  /  【2…】要判断として抽出"
-            textSize = 11f
-            setTextColor(Color.GRAY)
-        })
-
         editor = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             gravity = Gravity.TOP
             typeface = Typeface.MONOSPACE
             textSize = 14f
-            minLines = 16
+            minLines = 12
+            hint = "文字起こし結果がここに表示されます"
             setHorizontallyScrolling(false)
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun afterTextChanged(s: android.text.Editable?) { dirty = true; refreshPage() }
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            })
         }
         root.addView(editor, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        saveBtn = Button(this).apply {
+            text = "テキストを保存"
+            isEnabled = false
+            setOnClickListener { saveText() }
+        }
+        root.addView(saveBtn)
+
+        root.addView(divider(d))
+
+        // ---- 3. 削除 ----
+        delBtn = Button(this).apply {
+            text = "この音源を削除"
+            isEnabled = false
+            setOnClickListener { confirmDelete() }
+        }
+        root.addView(delBtn)
 
         setContentView(ScrollView(this).apply {
             addView(root, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         })
 
-        restore()
-        handleSend(intent)
+        ask()
+        showWork()
     }
 
-    override fun onNewIntent(i: Intent?) {
-        super.onNewIntent(i)
-        handleSend(i)
+    private fun divider(d: Float) = View(this).apply {
+        setBackgroundColor(Color.LTGRAY)
+        val lp = LinearLayout.LayoutParams(MATCH_PARENT, (d * 1).toInt())
+        lp.topMargin = (d * 12).toInt(); lp.bottomMargin = (d * 12).toInt()
+        layoutParams = lp
     }
 
-    private fun handleSend(i: Intent?) {
-        if (i == null) return
-        if (i.action == Intent.ACTION_SEND && i.type?.startsWith("text/") == true) {
-            val s = i.getStringExtra(Intent.EXTRA_TEXT)
-            if (s != null) { setText(s, "共有されたテキスト"); return }
-            i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { readUri(it) }
-        }
+    // ---------- 権限 ----------
+
+    private fun ask() {
+        val need = ArrayList<String>()
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) need.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (termuxInstalled() && !hasTermuxPerm()) need.add(PERM_TERMUX)
+        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 99)
     }
 
-    private fun restore() {
-        val id = Store.session(this) ?: return
-        files = Store.files(this, id)
-        if (files.isNotEmpty()) {
-            page = 0
-            open(0)
-            status.text = "前回のセッション $id（${files.size}ファイル）"
-        }
+    private fun hasTermuxPerm() =
+        checkSelfPermission(PERM_TERMUX) == PackageManager.PERMISSION_GRANTED
+
+    private fun termuxInstalled(): Boolean = try {
+        packageManager.getPackageInfo("com.termux", 0); true
+    } catch (e: Exception) { false }
+
+    override fun onRequestPermissionsResult(req: Int, perms: Array<out String>, res: IntArray) {
+        super.onRequestPermissionsResult(req, perms, res)
+        if (req == REQ_TERMUX && hasTermuxPerm()) transcribe()
     }
 
-    private fun pickText() {
+    // ---------- 作業フォルダ ----------
+
+    private fun pickTree() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE)
+    }
+
+    private fun showWork() {
+        val fs = Prefs.fsPath(this)
+        workBtn.text = if (fs == null) "作業フォルダを選ぶ（未設定）"
+        else "作業フォルダ: ${fs.substringAfter("/storage/emulated/0/")}"
+    }
+
+    // ---------- 開く・再生 ----------
+
+    private fun pickAudio() {
         startActivityForResult(
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = "*/*"
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/plain", "text/*", "*/*"))
-            }, REQ_TEXT
+                type = "audio/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/aac", "audio/mp4", "audio/x-m4a", "audio/*"))
+            }, REQ_OPEN
         )
     }
 
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
         if (res != RESULT_OK) return
-        if (req == REQ_TEXT) data?.data?.let { readUri(it) }
-    }
-
-    private fun readUri(u: Uri) {
-        thread {
-            try {
-                val s = contentResolver.openInputStream(u)!!.use {
-                    it.readBytes().toString(Charsets.UTF_8)
+        when (req) {
+            REQ_TREE -> data?.data?.let { uri ->
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                } catch (_: Exception) {}
+                Prefs.saveTree(this, uri.toString())
+                showWork()
+                if (Prefs.fsPath(this) == null) {
+                    status.text = "本体ストレージのフォルダを選んでください。\n" +
+                            "（SDカード等は Termux と共有できません）"
                 }
-                val name = (u.lastPathSegment ?: "text").substringAfterLast('/')
-                ui.post { setText(s, name) }
-            } catch (e: Exception) {
-                ui.post { status.text = "読込失敗: ${e.message}" }
             }
+            REQ_OPEN -> data?.data?.let { setAudio(it) }
+            REQ_SAVE -> data?.data?.let { writeTextTo(it) }
         }
     }
 
-    private fun setText(s: String, name: String) {
-        text = s
-        srcName = name
-        srcView.text = "$name  ${s.length}字（約${s.length / 250}分）"
-        runBtn.isEnabled = true
-    }
-
-    // ---------- 3. 分割 ----------
-
-    private fun runSplit() {
-        val src = text ?: return
-        val limit = limitInput.text.toString().toIntOrNull()?.coerceIn(100, 20000)
-            ?: Store.DEFAULT_LIMIT
-        Store.saveLimit(this, limit)
-
-        val items = Store.parseItems(Store.rawItems(this))
-        if (items.isEmpty()) { status.text = "確認項目が空です"; return }
-
-        runBtn.isEnabled = false
-        status.text = "分割中..."
-
-        thread {
-            try {
-                val chunks = Splitter.split(src, limit)
-                val id = Store.newSessionId()
-                val dir = Store.sessionDir(this, id)
-                dir.listFiles()?.forEach { it.delete() }
-
-                for (c in chunks) {
-                    File(dir, String.format("%03d.txt", c.index))
-                        .writeText(Splitter.render(c, chunks.size, items), Charsets.UTF_8)
-                }
-                Store.saveSession(this, id)
-
-                ui.post {
-                    runBtn.isEnabled = true
-                    files = Store.files(this, id)
-                    page = 0
-                    open(0)
-                    status.text = "保存しました  ${files.size}ファイル\n$id"
-                }
-            } catch (e: Exception) {
-                ui.post { runBtn.isEnabled = true; status.text = "失敗: ${e.message}" }
-            }
-        }
-    }
-
-    // ---------- 編集 ----------
-
-    private fun open(i: Int) {
-        if (files.isEmpty()) { status.text = "先に分割してください"; return }
-        page = i.coerceIn(0, files.size - 1)
-        editor.setText(files[page].readText(Charsets.UTF_8))
-        dirty = false
-        refreshPage()
-    }
-
-    private fun save() {
-        if (files.isEmpty()) return
+    private fun setAudio(uri: Uri) {
+        releasePlayer()
         try {
-            files[page].writeText(editor.text.toString(), Charsets.UTF_8)
-            dirty = false
-            refreshPage()
-            status.text = "保存しました  ${files[page].name}"
+            contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: Exception) {}
+        audioUri = uri
+        audioName = queryName(uri)
+        nameView.text = audioName
+        playBtn.isEnabled = true
+        transBtn.isEnabled = true
+        delBtn.isEnabled = true
+        seek.isEnabled = true
+        status.text = ""
+        preparePlayer(uri)
+    }
+
+    private fun queryName(uri: Uri): String {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                ?: uri.lastPathSegment ?: "audio"
+        } catch (e: Exception) {
+            uri.lastPathSegment ?: "audio"
+        }
+    }
+
+    private fun preparePlayer(uri: Uri) {
+        prepared = false
+        player = MediaPlayer().apply {
+            try {
+                setDataSource(this@MainActivity, uri)
+                setOnPreparedListener {
+                    prepared = true
+                    seek.max = duration
+                    updateTime(0, duration)
+                }
+                setOnCompletionListener {
+                    playBtn.text = "再生"
+                    seek.progress = 0
+                }
+                prepareAsync()
+            } catch (e: Exception) {
+                status.text = "再生準備に失敗: ${e.message}"
+            }
+        }
+    }
+
+    private fun togglePlay() {
+        val p = player ?: return
+        if (!prepared) return
+        if (p.isPlaying) {
+            p.pause()
+            playBtn.text = "再生"
+        } else {
+            p.start()
+            playBtn.text = "一時停止"
+            trackProgress()
+        }
+    }
+
+    private fun trackProgress() {
+        ui.post(object : Runnable {
+            override fun run() {
+                val p = player ?: return
+                if (!prepared) return
+                if (p.isPlaying) {
+                    seek.progress = p.currentPosition
+                    updateTime(p.currentPosition, p.duration)
+                    ui.postDelayed(this, 500)
+                }
+            }
+        })
+    }
+
+    private fun updateTime(pos: Int, dur: Int) {
+        timeView.text = "${fmt(pos)} / ${fmt(dur)}"
+    }
+
+    private fun fmt(ms: Int): String {
+        val s = ms / 1000
+        return String.format("%d:%02d", s / 60, s % 60)
+    }
+
+    private fun releasePlayer() {
+        try { player?.release() } catch (_: Exception) {}
+        player = null
+        prepared = false
+        if (::playBtn.isInitialized) playBtn.text = "再生"
+    }
+
+    // ---------- 文字起こし ----------
+
+    private fun transcribe() {
+        val uri = audioUri ?: return
+
+        if (!termuxInstalled()) { status.text = "Termuxが見つかりません。"; return }
+        if (!hasTermuxPerm()) { requestPermissions(arrayOf(PERM_TERMUX), REQ_TERMUX); return }
+
+        val fsDir = Prefs.fsPath(this)
+        val tree = Prefs.tree(this)
+        if (fsDir == null || tree == null) {
+            status.text = "先に「作業フォルダを選ぶ」で\n本体ストレージのフォルダを指定してください。"
+            return
+        }
+
+        transBtn.isEnabled = false
+        status.text = "音源を作業フォルダへコピー中..."
+
+        thread {
+            try {
+                // 一意な名前で作業フォルダへコピー（Termux が実パスで読めるように）
+                val stamp = System.currentTimeMillis()
+                val inName = "in_${stamp}.m4a"
+                val treeUri = Uri.parse(tree)
+                val dir = DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+                )
+                val doc = DocumentsContract.createDocument(
+                    contentResolver, dir, "audio/mp4", inName
+                ) ?: throw IllegalStateException("作業フォルダに書き込めません")
+                contentResolver.openOutputStream(doc)!!.use { out ->
+                    contentResolver.openInputStream(uri)!!.use { it.copyTo(out) }
+                }
+
+                val inPath = "$fsDir/$inName"
+                val base = "in_$stamp"   // okoshi 出力は STAMP_base.txt を含む
+
+                ui.post { status.text = "Termuxへ送信..." }
+
+                val i = Intent().apply {
+                    setClassName("com.termux", "com.termux.app.RunCommandService")
+                    action = "com.termux.RUN_COMMAND"
+                    putExtra("com.termux.RUN_COMMAND_PATH", OKOSHI)
+                    putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf(inPath))
+                    putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
+                    putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
+                }
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+
+                ui.post { startPolling(base) }
+            } catch (e: Exception) {
+                ui.post {
+                    transBtn.isEnabled = true
+                    status.text = "失敗: ${e.message}"
+                }
+            }
+        }
+    }
+
+    /** 作業フォルダ(SAF)を監視し、base を含む .txt の出現を待つ。 */
+    private fun startPolling(base: String) {
+        if (polling) return
+        polling = true
+        val started = System.currentTimeMillis()
+
+        ui.post(object : Runnable {
+            override fun run() {
+                if (!polling) return
+                val min = ((System.currentTimeMillis() - started) / 60000).toInt()
+
+                thread {
+                    val found = findTxt(base)
+                    ui.post {
+                        if (!polling) return@post
+                        when {
+                            found != null -> {
+                                polling = false
+                                transBtn.isEnabled = true
+                                editor.setText(found)
+                                saveBtn.isEnabled = true
+                                status.text = "完了（${min}分）  ${found.length}字"
+                            }
+                            min >= TIMEOUT_MIN -> {
+                                polling = false
+                                transBtn.isEnabled = true
+                                status.text = "${TIMEOUT_MIN}分待っても出力がありません。\n" +
+                                        "Termuxで状況を確認してください。"
+                            }
+                            else -> {
+                                status.text = "文字起こし中... ${min}分経過\n" +
+                                        "1時間の音源は1〜2時間かかります。\n" +
+                                        "画面を閉じても処理は続きます。"
+                                ui.postDelayed(this, POLL_MS)
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    private fun findTxt(base: String): String? {
+        val t = Prefs.tree(this) ?: return null
+        return try {
+            val tree = Uri.parse(t)
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(
+                tree, DocumentsContract.getTreeDocumentId(tree)
+            )
+            contentResolver.query(
+                children,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME
+                ), null, null, null
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    if (!name.endsWith(".txt") || !name.contains(base)) continue
+                    val doc = DocumentsContract.buildDocumentUriUsingTree(tree, c.getString(0))
+                    val s = contentResolver.openInputStream(doc)!!.use {
+                        it.readBytes().toString(Charsets.UTF_8)
+                    }
+                    if (s.isNotBlank()) return s
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ---------- 保存 ----------
+
+    private fun saveText() {
+        val suggested = audioName.substringBeforeLast('.') + ".txt"
+        startActivityForResult(
+            Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TITLE, suggested)
+            }, REQ_SAVE
+        )
+    }
+
+    private fun writeTextTo(uri: Uri) {
+        try {
+            contentResolver.openOutputStream(uri, "wt")!!.use {
+                it.write(editor.text.toString().toByteArray(Charsets.UTF_8))
+            }
+            status.text = "保存しました"
         } catch (e: Exception) {
             status.text = "保存失敗: ${e.message}"
         }
     }
 
-    private fun move(d: Int) {
-        if (files.isEmpty()) return
-        if (dirty) save()
-        open(page + d)
+    // ---------- 削除 ----------
+
+    private fun confirmDelete() {
+        val uri = audioUri ?: return
+        AlertDialog.Builder(this)
+            .setTitle("削除の確認")
+            .setMessage("$audioName を削除します。元に戻せません。")
+            .setNegativeButton("キャンセル", null)
+            .setPositiveButton("削除") { _, _ -> doDelete(uri) }
+            .show()
     }
 
-    private fun refreshPage() {
-        if (files.isEmpty()) { pageLabel.text = "-"; return }
-        pageLabel.text = "${page + 1} / ${files.size}" + if (dirty) "  *未保存" else ""
-    }
-
-    /** カーソル位置を含む【】の中身の先頭に数字を入れる。 */
-    private fun addDigit(digit: Char) {
-        val s = editor.text.toString()
-        val pos = editor.selectionStart.coerceIn(0, s.length)
-        val open = s.lastIndexOf('【', (pos - 1).coerceAtLeast(0))
-        if (open < 0) { status.text = "【】の中にカーソルを置いてください"; return }
-        val close = s.indexOf('】', open + 1)
-        if (close < 0 || close < pos - 1) { status.text = "【】の中にカーソルを置いてください"; return }
-
-        val inner = s.substring(open + 1, close)
-        val cleaned = if (inner.isNotEmpty() && inner[0] in "12１２") inner.substring(1) else inner
-        val next = s.substring(0, open + 1) + digit + cleaned + s.substring(close)
-        editor.setText(next)
-        editor.setSelection((open + 2).coerceAtMost(next.length))
-        status.text = "【$digit$cleaned】にしました"
-    }
-
-    /** 選択範囲を【2…】で囲む。 */
-    private fun wrapTwo() {
-        val s = editor.text.toString()
-        var a = editor.selectionStart
-        var b = editor.selectionEnd
-        if (a > b) { val t = a; a = b; b = t }
-        if (a == b) { status.text = "囲みたい範囲を選択してください"; return }
-        val next = s.substring(0, a) + "【2" + s.substring(a, b) + "】" + s.substring(b)
-        editor.setText(next)
-        editor.setSelection((b + 3).coerceAtMost(next.length))
-        status.text = "【2…】で囲みました"
-    }
-
-    // ---------- 4. 分析 ----------
-
-    private fun analyze() {
-        if (dirty) save()
-        val id = Store.session(this)
-        if (id == null || Store.files(this, id).isEmpty()) {
-            status.text = "先に分割してください"
-            return
+    private fun doDelete(uri: Uri) {
+        releasePlayer()
+        try {
+            val ok = DocumentsContract.deleteDocument(contentResolver, uri)
+            if (ok) {
+                audioUri = null
+                audioName = "-"
+                nameView.text = "未選択"
+                playBtn.isEnabled = false
+                transBtn.isEnabled = false
+                delBtn.isEnabled = false
+                seek.isEnabled = false
+                seek.progress = 0
+                updateTime(0, 0)
+                status.text = "削除しました"
+            } else {
+                status.text = "削除できませんでした（この場所は削除に対応していません）"
+            }
+        } catch (e: Exception) {
+            status.text = "削除失敗: ${e.message}"
         }
-        startActivity(Intent(this, AnalyzeActivity::class.java))
     }
 
     override fun onPause() {
-        if (dirty) save()
+        try { if (player?.isPlaying == true) { player?.pause(); playBtn.text = "再生" } } catch (_: Exception) {}
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        polling = false
+        releasePlayer()
+        super.onDestroy()
     }
 }
