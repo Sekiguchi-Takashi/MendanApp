@@ -11,8 +11,8 @@ android {
         applicationId "com.appathy.mendan"
         minSdk 26
         targetSdk 34
-        versionCode 10
-        versionName "1.0"
+        versionCode 20
+        versionName "2.0"
     }
 
     signingConfigs {
@@ -26,10 +26,7 @@ android {
 
     buildTypes {
         debug { signingConfig signingConfigs.release }
-        release {
-            minifyEnabled false
-            signingConfig signingConfigs.release
-        }
+        release { minifyEnabled false; signingConfig signingConfigs.release }
     }
 
     compileOptions {
